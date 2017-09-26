@@ -59,12 +59,16 @@ namespace realsense_camera
     std::string imu_frame_id_;
     std::string imu_optical_frame_id_;
     float imu_angular_vel_[3];
+    float last_imu_angular_vel_[3];
     float imu_linear_accel_[3];
     float imu_angular_vel_cov_[9] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     float imu_linear_accel_cov_[9] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
     double imu_ts_;
     double prev_imu_ts_;
     ros::Publisher imu_publisher_;
+    ros::Publisher accel_publisher_;
+    ros::Publisher gyro_publisher_;
+    ros::Publisher fused_imu_publisher_;
     boost::shared_ptr<boost::thread> imu_thread_;
     std::function<void(rs::motion_data)> motion_handler_;
     std::function<void(rs::timestamp_data)> timestamp_handler_;

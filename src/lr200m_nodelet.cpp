@@ -39,6 +39,8 @@ namespace realsense_camera
    */
   void LR200MNodelet::onInit()
   {
+    ROS_INFO("Experimental driver with IMU covariance and additional IMU messages");
+
     format_[RS_STREAM_COLOR] = RS_FORMAT_RGB8;
     encoding_[RS_STREAM_COLOR] = sensor_msgs::image_encodings::RGB8;
     cv_type_[RS_STREAM_COLOR] = CV_8UC3;
@@ -74,6 +76,25 @@ namespace realsense_camera
     {
       imu_thread_ =
           boost::shared_ptr<boost::thread>(new boost::thread(boost::bind(&LR200MNodelet::prepareIMU, this)));
+
+       rs_motion_intrinsics imu_intrinsics;
+       rs_get_motion_intrinsics(rs_device_, &imu_intrinsics, &rs_error_);
+       checkError();
+    
+       
+       for (int i = 0; i < 3; ++i)
+       {
+         // map Intel axis orientation to ROS axis orientation
+         int j[3] = {4, 8, 0};
+
+         imu_linear_accel_cov_[j[i]] += imu_intrinsics.acc.noise_variances[i];
+         imu_linear_accel_cov_[j[i]] += imu_intrinsics.acc.bias_variances[i];
+         imu_angular_vel_cov_[j[i]] += imu_intrinsics.gyro.noise_variances[i];
+         imu_angular_vel_cov_[j[i]] += imu_intrinsics.gyro.bias_variances[i];
+       }
+    
+
+
     } 
   }
 
@@ -124,6 +145,9 @@ namespace realsense_camera
 
     ros::NodeHandle imu_nh(nh_, IMU_NAMESPACE);
     imu_publisher_ = imu_nh.advertise<sensor_msgs::Imu>(IMU_TOPIC, 1000);
+    accel_publisher_ = imu_nh.advertise<sensor_msgs::Imu>(ACCEL_TOPIC, 1000);
+    gyro_publisher_ = imu_nh.advertise<sensor_msgs::Imu>(GYRO_TOPIC, 1000);
+    fused_imu_publisher_ = imu_nh.advertise<sensor_msgs::Imu>(FUSED_IMU_TOPIC, 1000);
     
   }
 
@@ -662,10 +686,11 @@ namespace realsense_camera
           for (int i = 0; i < 3; ++i)
           {
             imu_angular_vel_[i] = entry.axes[i];
+            last_imu_angular_vel_[i] = imu_angular_vel_[i];
             imu_linear_accel_[i] = 0.0;
           }
-          imu_angular_vel_cov_[0] = 0.0;
-          imu_linear_accel_cov_[0] = -1.0;
+          //imu_angular_vel_cov_[0] = 0.0;
+          //imu_linear_accel_cov_[0] = -1.0;
         }
         else if (entry.timestamp_data.source_id == RS_EVENT_IMU_ACCEL)
         {
@@ -674,8 +699,8 @@ namespace realsense_camera
             imu_angular_vel_[i] = 0.0;
             imu_linear_accel_[i] = entry.axes[i];
           }
-          imu_angular_vel_cov_[0] = -1.0;
-          imu_linear_accel_cov_[0] = 0.0;
+          //imu_angular_vel_cov_[0] = -1.0;
+          //imu_linear_accel_cov_[0] = 0.0;
         }
 
      
@@ -690,21 +715,57 @@ namespace realsense_camera
           imu_msg.orientation.w = 0.0; 
           imu_msg.orientation_covariance = {-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
 
-          imu_msg.angular_velocity.x = imu_angular_vel_[0];
-          imu_msg.angular_velocity.y = imu_angular_vel_[1];
-          imu_msg.angular_velocity.z = imu_angular_vel_[2];
+          imu_msg.angular_velocity.x = -imu_angular_vel_[2];// remapped from 0 and changed sign
+          imu_msg.angular_velocity.y = imu_angular_vel_[0]; // remapped from 1
+          imu_msg.angular_velocity.z = imu_angular_vel_[1]; // remapped from 2
 
-          imu_msg.linear_acceleration.x = imu_linear_accel_[0];
-          imu_msg.linear_acceleration.y = imu_linear_accel_[1];
-          imu_msg.linear_acceleration.z = imu_linear_accel_[2]; 
+          imu_msg.linear_acceleration.x = -imu_linear_accel_[2];  // same as above
+          imu_msg.linear_acceleration.y = imu_linear_accel_[0];
+          imu_msg.linear_acceleration.z = imu_linear_accel_[1]; 
  
-          for (int i = 0; i < 9; ++i)
+
+          if (entry.timestamp_data.source_id == RS_EVENT_IMU_GYRO)
           {
-            imu_msg.angular_velocity_covariance[i] = imu_angular_vel_cov_[i];
-            imu_msg.linear_acceleration_covariance[i] = imu_linear_accel_cov_[i];
+             for (int i = 0; i < 9; ++i)
+             {
+               imu_msg.angular_velocity_covariance[i] = imu_angular_vel_cov_[i];
+               imu_msg.linear_acceleration_covariance[i] = 0.0;
+             }
+             imu_msg.linear_acceleration_covariance[0] = -1.0;
+          }
+          else if (entry.timestamp_data.source_id == RS_EVENT_IMU_ACCEL)
+          {
+             for (int i = 0; i < 9; ++i)
+             {
+               imu_msg.angular_velocity_covariance[i] = 0.0;
+               imu_msg.linear_acceleration_covariance[i] = imu_linear_accel_cov_[i];
+             }
+             imu_msg.angular_velocity_covariance[0] = -1.0;
           }
 
           imu_publisher_.publish(imu_msg);
+          if (entry.timestamp_data.source_id == RS_EVENT_IMU_GYRO)
+          {
+             gyro_publisher_.publish(imu_msg);
+          }
+          else if (entry.timestamp_data.source_id == RS_EVENT_IMU_ACCEL)
+          {
+             accel_publisher_.publish(imu_msg);
+
+             // bring the last gyro readings back into the message
+             imu_msg.angular_velocity.x = -last_imu_angular_vel_[2];// remapped from 0 and changed sign
+             imu_msg.angular_velocity.y = last_imu_angular_vel_[0]; // remapped from 1
+             imu_msg.angular_velocity.z = last_imu_angular_vel_[1]; // remapped from 2
+
+             // along with the covariances
+             for (int i = 0; i < 9; ++i)
+             {
+               imu_msg.angular_velocity_covariance[i] = imu_angular_vel_cov_[i];
+             }
+
+             fused_imu_publisher_.publish(imu_msg);
+          }
+
 
           
          
